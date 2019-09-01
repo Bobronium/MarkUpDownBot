@@ -1,16 +1,21 @@
 import inspect
 from functools import partial
-from typing import Optional
+from typing import Optional, Union, Callable, Any, Awaitable
 
+from aiogram import Bot
 from aiogram.types import Message
 
-from bot import SendMessageMethod, bot, AnyContentType
+import config
+
+AnyContentType = Union[config.MEDIA_CONTENT_TYPES]
+SendMessageMethod = Callable[[Any], Awaitable[Message]]
 
 
 def get_send_method(message: Message, *args, **kwargs) -> SendMessageMethod:
     """
     :return: appropriate method to resend message content
     """
+    bot = Bot.get_current()
     send_method: SendMessageMethod = getattr(bot, f'send_{message.content_type}', bot.send_message)
 
     if kwargs:

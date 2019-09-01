@@ -2,11 +2,10 @@ import asyncio
 import logging
 from contextlib import contextmanager
 from functools import partial
-from typing import Callable, Any, Awaitable, Union
 from unittest.mock import patch
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, ContentType, Update, MessageEntityType, CallbackQuery
+from aiogram.types import Message, Update, MessageEntityType, CallbackQuery
 from aiogram.utils.exceptions import CantParseEntities, MessageNotModified
 from aiogram.utils.markdown import text, code
 
@@ -18,18 +17,6 @@ logger = logging.getLogger('bot')
 
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher(bot=bot)
-
-MEDIA_CONTENT_TYPES = (
-    ContentType.TEXT,
-    ContentType.VIDEO,
-    ContentType.VOICE,
-    ContentType.AUDIO,
-    ContentType.DOCUMENT,
-    ContentType.PHOTO
-)
-
-AnyContentType = Union[MEDIA_CONTENT_TYPES]
-SendMessageMethod = Callable[[Any], Awaitable[Message]]
 
 SHOW_RAW = 'Markdown'
 SHOW_FORMATTED = 'Markup'
@@ -94,7 +81,7 @@ async def greet_user(message: Message):
     await message.reply(GREETING, parse_mode='markdown', reply_markup=SHOW_RAW_MARKUP, disable_web_page_preview=True)
 
 
-@dp.message_handler(content_types=MEDIA_CONTENT_TYPES)
+@dp.message_handler(content_types=config.MEDIA_CONTENT_TYPES)
 async def answer_on_message(message: Message):
     """
     Extracts markdown text from message and sends it back with same media
@@ -106,7 +93,7 @@ async def answer_on_message(message: Message):
         try:
             md_text = message.md_text
         except TypeError:
-            md_text = 'Why would you _send me_ `media` without *any* `description`?'
+            md_text = 'Why would you _send me_ `media` without *any* `caption`?'
 
     content = get_file_id(message) or md_text
     send_content = get_send_method(message, message.chat.id, content, disable_web_page_preview=True, caption=md_text)
