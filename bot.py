@@ -1,48 +1,65 @@
 import asyncio
 import logging
-from contextlib import contextmanager
-from functools import partial
+from typing import Optional
 from unittest.mock import patch
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, Update, MessageEntityType, CallbackQuery
+from aiogram.types import Message, Update, MessageEntityType, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils import markdown
 from aiogram.utils.exceptions import CantParseEntities, MessageNotModified
-from aiogram.utils.markdown import text, code
+from aiogram.utils.markdown import text, code, escape_md, quote_html, pre, LIST_MD_SYMBOLS
 
 import config
-from keyboards import one_button_markup
-from messages import get_send_method, get_file_id
 
 logger = logging.getLogger('bot')
 
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher(bot=bot)
 
-SHOW_RAW = 'Markdown'
+SHOW_RAW_MD = 'Markdown'
+SHOW_RAW_HTML = 'HTML'
 SHOW_FORMATTED = 'Markup'
 
-SHOW_RAW_MARKUP = one_button_markup(SHOW_RAW, callback_data=SHOW_RAW)
-SHOW_FORMATTED_MARKUP = one_button_markup(SHOW_FORMATTED, callback_data=SHOW_FORMATTED)
+SHOW_RAW_MARKUP = InlineKeyboardMarkup(
+    inline_keyboard=[[
+        InlineKeyboardButton(text=SHOW_RAW_MD, callback_data=SHOW_RAW_MD),
+        InlineKeyboardButton(text=SHOW_RAW_HTML, callback_data=SHOW_RAW_HTML)
+    ]]
+)
+
+SHOW_FORMATTED_MARKUP = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text=SHOW_FORMATTED, callback_data=SHOW_FORMATTED)
+]])
 
 GREETING = text(
     '*Hello there!*',
-    'Send me message with some markup and I will convert it to '
-    '[raw markdown](https://core.telegram.org/bots/api#markdown-style)',
 
-    '\nMessages containing media with caption are also supported',
+    '\nSend me message _with_ `some` *markup*, '
+    '[raw markdown](https://core.telegram.org/bots/api#markdown-style) or '
+    '[raw html](https://core.telegram.org/bots/api#html-style).',
+
+    '\nSupported tags:',
+    '- *bold text*',
+    '- _italic text_',
+    '- `inline fixed-width code`',
+    '- [inline mention of a user](tg://user?id=93212972)',
+    '- [inline URL](http://www.example.com/)',
+    '```\nblock_language\n    pre-formatted fixed-width code block```',
 
     '\n_(underline and strikethrough text is not supported yet)_',
     sep='\n'
 )
 
+# Dirty hack to avoid aiogram escape existing symbols and modifying plain urls
+# TODO: PR for this maybe?
+dont_escape_md = patch('aiogram.utils.markdown.escape_md', new=lambda s: s)
+dont_change_plain_urls = patch.object(MessageEntityType, 'URL', new='NOT URL')
 
-@contextmanager
-def dont_escape_md():
-    """
-    Dirty hack to avoid aiogram escape existing md symbols and modifying plain urls
-    """
-    with patch('aiogram.utils.markdown.escape_md', new=lambda s: s), patch.object(MessageEntityType, 'URL', new=None):
-        yield
+# Remove '\n' before closing ``` in markdown
+# Otherwise newlines will grow on each parsing
+markdown.MD_SYMBOLS = (
+        markdown.MD_SYMBOLS[:3] + ((LIST_MD_SYMBOLS[2] * 3 + '\n', LIST_MD_SYMBOLS[2] * 3),) + markdown.MD_SYMBOLS[4:]
+)
 
 
 def get_error_caption(bad_text: str, exc_message: str):
@@ -57,7 +74,7 @@ def get_error_caption(bad_text: str, exc_message: str):
         _, offset = exc_message.rsplit('offset', maxsplit=1)
         offset = int(offset.strip())
         encoded = bad_text.encode()
-        offset = len(encoded[:offset + 1].decode())
+        offset = len(encoded[:offset].decode())
         exc_message += f', (chars offset {offset})'
     except ValueError as e:
         logger.exception(e)
@@ -66,14 +83,43 @@ def get_error_caption(bad_text: str, exc_message: str):
         if offset < chars_before:
             chars_before = offset
 
-        start = offset - chars_before
+        bad_char = offset + 1
+        start = bad_char - chars_before
 
         bad_line = bad_text.replace('\n', ' ')[start:offset + 5]
         pointer_line = ' ' * (chars_before - 1) + '^'
-        caption = f':\n\n{code(bad_line)}\n{code(pointer_line)}'
+        caption = f':\n\n{pre(bad_line)}\n{code(pointer_line)}'
         exc_message += caption
 
     return exc_message
+
+
+def detect_parse_mode(message: Message) -> Optional[str]:
+    """
+    Detects message formatting
+    (html, markdown or None if message has special entities)
+    """
+
+    raw_text: str = message.text
+
+    before_escape_md = raw_text.count('\\')
+    before_escape_html = raw_text.count('&')
+    escaped_md = escape_md(raw_text).count('\\') - before_escape_md
+    escaped_html = quote_html(raw_text).count('&') - before_escape_html
+
+    with dont_change_plain_urls, dont_escape_md:
+        with_entities = message.md_text
+
+    escaped_with_entities = escape_md(with_entities).count('\\') - before_escape_md
+
+    if escaped_html <= escaped_md < escaped_with_entities:
+        parse_mode = None
+    elif escaped_html > escaped_md:
+        parse_mode = 'html'
+    else:
+        parse_mode = 'markdown'
+
+    return parse_mode
 
 
 @dp.message_handler(commands='start')
@@ -81,41 +127,34 @@ async def greet_user(message: Message):
     await message.reply(GREETING, parse_mode='markdown', reply_markup=SHOW_RAW_MARKUP, disable_web_page_preview=True)
 
 
-@dp.message_handler(content_types=config.MEDIA_CONTENT_TYPES)
+@dp.message_handler()
 async def answer_on_message(message: Message):
     """
-    Extracts markdown text from message and sends it back with same media
-    If message doesn't have any formatting in entities (plain urls, mentions, etc... doesn't count),
-    sends it with parse_mode='markdown'
+    If message sent without tg formatting, detects its formatting (md or html) and send it back parsed
+    Otherwise parses message entities and send it in markdown
     """
 
-    with dont_escape_md():
-        try:
-            md_text = message.md_text
-        except TypeError:
-            md_text = 'Why would you _send me_ `media` without *any* `caption`?'
+    bot.parse_mode = parse_mode = detect_parse_mode(message)
 
-    content = get_file_id(message) or md_text
-    send_content = get_send_method(message, message.chat.id, content, disable_web_page_preview=True, caption=md_text)
-
-    raw_text = message.text or message.caption
-    if raw_text == md_text:
-        # Message didn't contain any special entities
-        # so try to format it as markdown
-        send_content = partial(send_content, parse_mode='markdown', reply_markup=SHOW_RAW_MARKUP)
+    if parse_mode is None:
+        # Message contained special entities
+        markup = SHOW_FORMATTED_MARKUP
+        with dont_change_plain_urls:
+            message_text = message.md_text
     else:
-        send_content = partial(send_content, reply_markup=SHOW_FORMATTED_MARKUP)
+        markup = SHOW_RAW_MARKUP
+        message_text = message.text
 
     try:
-        await send_content()
+        await bot.send_message(message.chat.id, message_text, reply_markup=markup, disable_web_page_preview=True)
     except CantParseEntities as e:
-        err_message = get_error_caption(md_text, str(e))
+        err_message = get_error_caption(message_text, str(e))
         await message.reply(err_message, parse_mode='markdown')
     else:
         await message.delete()
 
 
-@dp.callback_query_handler(lambda q: q.data in (SHOW_RAW, SHOW_FORMATTED))
+@dp.callback_query_handler(lambda q: q.data in (SHOW_RAW_MD, SHOW_RAW_HTML, SHOW_FORMATTED))
 async def modify_message(query: CallbackQuery):
     """
     That's how `Markup` and `Markdown` buttons work
@@ -125,24 +164,21 @@ async def modify_message(query: CallbackQuery):
     message = query.message
 
     if query.data == SHOW_FORMATTED:
+        bot.parse_mode = detect_parse_mode(message)
         markup = SHOW_RAW_MARKUP
-        parse_mode = 'markdown'
+        new_text = message.text
     else:
         markup = SHOW_FORMATTED_MARKUP
-        parse_mode = None
-
-    with dont_escape_md():
-        new_text = message.md_text
-
-    if message.caption:
-        edit_message = message.edit_caption
-    else:
-        edit_message = partial(message.edit_text, disable_web_page_preview=True)
+        to_html = query.data == SHOW_RAW_HTML
+        with dont_change_plain_urls:
+            bot.parse_mode = 'html' if to_html else 'markdown'  # https://github.com/aiogram/aiogram/pull/205/
+            new_text = message.html_text if to_html else message.md_text
+        bot.parse_mode = None
 
     answer_callback = asyncio.create_task(query.answer())  # remove 'Loading...' on user side quickly
 
     try:
-        await edit_message(new_text, parse_mode=parse_mode, reply_markup=markup)
+        await message.edit_text(new_text, disable_web_page_preview=True, reply_markup=markup)
     except CantParseEntities as e:
         answer_callback.cancel()
         await query.answer(str(e), show_alert=True)
@@ -158,5 +194,5 @@ async def handle_errors(update: Update, exception):
     message = update.message or update.callback_query.message
     if message is None:
         return
-    await message.bot.send_message(message.chat.id, 'Oops... Something went wrong.')
+    await message.bot.send_message(message.chat.id, 'Oops... Something went wrong here.')
     logger.exception(exception)
