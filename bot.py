@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from typing import Optional
@@ -94,7 +95,7 @@ def get_error_caption(bad_text: str, exc_message: str):
     return exc_message
 
 
-def detect_parse_mode(message: Message) -> Optional[str]:
+def detect_message_text_formatting(message: Message) -> Optional[str]:
     """
     Detects message formatting
     (html, markdown or None if message has special entities)
@@ -104,6 +105,7 @@ def detect_parse_mode(message: Message) -> Optional[str]:
 
     before_escape_md = raw_text.count('\\')
     before_escape_html = raw_text.count('&')
+
     escaped_md = escape_md(raw_text).count('\\') - before_escape_md
     escaped_html = quote_html(raw_text).count('&') - before_escape_html
 
@@ -112,7 +114,7 @@ def detect_parse_mode(message: Message) -> Optional[str]:
 
     escaped_with_entities = escape_md(with_entities).count('\\') - before_escape_md
 
-    if escaped_html <= escaped_md < escaped_with_entities:
+    if escaped_with_entities > max(escaped_html, escaped_md):
         parse_mode = None
     elif escaped_html > escaped_md:
         parse_mode = 'html'
@@ -131,19 +133,22 @@ async def greet_user(message: Message):
 async def answer_on_message(message: Message):
     """
     If message sent without tg formatting, detects its formatting (md or html) and send it back parsed
-    Otherwise parses message entities and send it in markdown
+    Otherwise sends it unchanged
     """
 
-    bot.parse_mode = parse_mode = detect_parse_mode(message)
+    formatting = detect_message_text_formatting(message)
 
-    if parse_mode is None:
+    if formatting is None:
         # Message contained special entities
-        markup = SHOW_FORMATTED_MARKUP
+        bot.parse_mode = 'markdown'
         with dont_change_plain_urls:
             message_text = message.md_text
     else:
-        markup = SHOW_RAW_MARKUP
+        # Send it with parse mode matching plain text formatting
+        bot.parse_mode = formatting
         message_text = message.text
+
+    markup = SHOW_RAW_MARKUP
 
     try:
         await bot.send_message(message.chat.id, message_text, reply_markup=markup, disable_web_page_preview=True)
@@ -164,7 +169,7 @@ async def modify_message(query: CallbackQuery):
     message = query.message
 
     if query.data == SHOW_FORMATTED:
-        bot.parse_mode = detect_parse_mode(message)
+        bot.parse_mode = detect_message_text_formatting(message)
         markup = SHOW_RAW_MARKUP
         new_text = message.text
     else:
