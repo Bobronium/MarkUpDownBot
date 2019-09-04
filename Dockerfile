@@ -1,5 +1,7 @@
-FROM python:alpine3.7
-COPY . /app
-WORKDIR /app
+FROM python:3.7.1-stretch
+
+RUN mkdir -p /usr/src/bot
+WORKDIR /usr/src/bot
+ADD . /usr/src/bot
+
 RUN pip install -r requirements.txt
-CMD python ./main.py
